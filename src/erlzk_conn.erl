@@ -82,64 +82,64 @@ start_link(ServerName, ServerList, Timeout, Options) ->
     gen_server:start_link(ServerName, ?MODULE, [ServerList, Timeout, Options], []).
 
 stop(Pid) ->
-    gen_server:call(Pid, stop).
+    gen_server:call(Pid, stop, infinity).
 
 create(Pid, Path, Data, Acl, CreateMode) ->
-    op_call(Pid, {create, {Path, Data, Acl, CreateMode}}).
+    gen_server:call(Pid, {create, {Path, Data, Acl, CreateMode}}, infinity).
 
 delete(Pid, Path, Version) ->
-    op_call(Pid, {delete, {Path, Version}}).
+    gen_server:call(Pid, {delete, {Path, Version}}, infinity).
 
 exists(Pid, Path, Watch) ->
-    op_call(Pid, {exists, {Path, Watch}}).
+    gen_server:call(Pid, {exists, {Path, Watch}}, infinity).
 
 exists(Pid, Path, Watch, Watcher) ->
-    op_call(Pid, {exists, {Path, Watch}, Watcher}).
+    gen_server:call(Pid, {exists, {Path, Watch}, Watcher}, infinity).
 
 get_data(Pid, Path, Watch) ->
-    op_call(Pid, {get_data, {Path, Watch}}).
+    gen_server:call(Pid, {get_data, {Path, Watch}}, infinity).
 
 get_data(Pid, Path, Watch, Watcher) ->
-    op_call(Pid, {get_data, {Path, Watch}, Watcher}).
+    gen_server:call(Pid, {get_data, {Path, Watch}, Watcher}, infinity).
 
 set_data(Pid, Path, Data, Version) ->
-    op_call(Pid, {set_data, {Path, Data, Version}}).
+    gen_server:call(Pid, {set_data, {Path, Data, Version}}, infinity).
 
 get_acl(Pid, Path) ->
-    op_call(Pid, {get_acl, {Path}}).
+    gen_server:call(Pid, {get_acl, {Path}}, infinity).
 
 set_acl(Pid, Path, Acl, Version) ->
-    op_call(Pid, {set_acl, {Path, Acl, Version}}).
+    gen_server:call(Pid, {set_acl, {Path, Acl, Version}}, infinity).
 
 get_children(Pid, Path, Watch) ->
-    op_call(Pid, {get_children, {Path, Watch}}).
+    gen_server:call(Pid, {get_children, {Path, Watch}}, infinity).
 
 get_children(Pid, Path, Watch, Watcher) ->
-    op_call(Pid, {get_children, {Path, Watch}, Watcher}).
+    gen_server:call(Pid, {get_children, {Path, Watch}, Watcher}, infinity).
 
 sync(Pid, Path) ->
-    op_call(Pid, {sync, {Path}}).
+    gen_server:call(Pid, {sync, {Path}}, infinity).
 
 get_children2(Pid, Path, Watch) ->
-    op_call(Pid, {get_children2, {Path, Watch}}).
+    gen_server:call(Pid, {get_children2, {Path, Watch}}, infinity).
 
 get_children2(Pid, Path, Watch, Watcher) ->
-    op_call(Pid, {get_children2, {Path, Watch}, Watcher}).
+    gen_server:call(Pid, {get_children2, {Path, Watch}, Watcher}, infinity).
 
 multi(Pid, Ops) ->
-    op_call(Pid, {multi, Ops}).
+    gen_server:call(Pid, {multi, Ops}, infinity).
 
 create2(Pid, Path, Data, Acl, CreateMode) ->
-    op_call(Pid, {create2, {Path, Data, Acl, CreateMode}}).
+    gen_server:call(Pid, {create2, {Path, Data, Acl, CreateMode}}, infinity).
 
 add_auth(Pid, Scheme, Auth) ->
-    op_call(Pid, {add_auth, {Scheme, Auth}}).
+    gen_server:call(Pid, {add_auth, {Scheme, Auth}}, infinity).
 
 no_heartbeat(Pid) ->
     gen_server:cast(Pid, no_heartbeat).
 
 kill_session(Pid) ->
-    gen_server:call(Pid, kill_session).
+    gen_server:call(Pid, kill_session, infinity).
 
 block_incoming_data(Pid) ->
     gen_server:cast(Pid, block_incoming_data).
@@ -201,8 +201,6 @@ init([ServerList, Timeout, Options]) ->
             {stop, Reason}
     end.
 
-handle_call(get_timeout, _From, State=#state{timeout=Timeout, ping_interval=PingIntv}) ->
-    {reply, {ok, Timeout}, State, PingIntv};
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 handle_call(_, _From, State=#state{socket=undefined, ping_interval=PingIntv}) ->
@@ -498,10 +496,6 @@ reconnect_after_session_expired(State=#state{servers=ServerList, auth_data=AuthD
             erlang:send_after(?ZK_RECONNECT_INTERVAL, self(), reconnect),
             {noreply, State}
     end.
-
-op_call(Pid, Message) ->
-    {ok, Timeout} = gen_server:call(Pid, get_timeout),
-    gen_server:call(Pid, Message, Timeout).
 
 add_init_auths([], _State) ->
     ok;
