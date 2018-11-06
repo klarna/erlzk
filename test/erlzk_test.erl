@@ -57,7 +57,9 @@ erlzk_test_() ->
                             fun watch/1,
                             fun reconnect_to_same/1,
                             fun reconnect_to_different/1,
-                            fun reconnect_with_stale_watches/1]]}}.
+                            fun reconnect_with_stale_watches/1,
+                            fun closed/1
+                           ]]}}.
 
 setup_docker() ->
     Stacks = os:cmd("docker stack ls"),
@@ -604,6 +606,46 @@ reconnect_with_stale_watches({ServerList, Timeout, _Chroot, _AuthData}) ->
     erlzk:delete(Pid, "/b"),
     erlzk:delete(Pid, "/c"),
     erlzk:close(Pid),
+    ok.
+
+closed({ServerList, Timeout, _Chroot, _AuthData}) ->
+    {ok, Pid} = connect_and_wait(ServerList, Timeout),
+    erlzk:block_incoming_data(Pid),
+    PidMons = [{Fun,
+                Args,
+                spawn_monitor(fun () -> ?assertEqual({error, closed}, apply(erlzk, Fun, [Pid | Args])) end)
+               }
+               || {Fun, Args} <- [{create,       ["/a"]},
+                                  {create,       ["/a", ?ZK_ACL_CREATOR_ALL_ACL]},
+                                  {create,       ["/a", <<$a>>, ?ZK_ACL_CREATOR_ALL_ACL]},
+                                  {create,       ["/a", <<$a>>, ?ZK_ACL_CREATOR_ALL_ACL, persistent]},
+                                  {delete,       ["/a"]},
+                                  {exists,       ["/a"]},
+                                  {exists,       ["/a", self()]},
+                                  {get_data,     ["/a"]},
+                                  {get_data,     ["/a", self()]},
+                                  {set_data,     ["/a", <<$a>>]},
+                                  {get_acl,      ["/a"]},
+                                  {set_acl,      ["/a", ?ZK_ACL_CREATOR_ALL_ACL]},
+                                  {get_children, ["/a"]},
+                                  {get_children, ["/a", self()]},
+                                  {multi,        [[erlzk:op({create, "/a"}), erlzk:op({delete, "/a"})]]}
+                                 ]
+              ],
+
+    %% Give a little time for all the workers to send their requests
+    timer:sleep(50),
+    erlzk:kill_connection(Pid),
+    [begin
+         N = length(Args) + 1,
+         F = fun erlzk:Fun/N,
+         R = receive {'DOWN', M, process, P, Reason} -> Reason
+             after 100 -> timeout
+             end,
+         ?assertEqual({F, normal}, {F, R})
+     end
+     || {Fun, Args, {P, M}} <- PidMons
+    ],
     ok.
 
 loop_watch_all([]) ->

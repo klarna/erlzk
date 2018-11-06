@@ -540,6 +540,9 @@ notify_callers_closed([]) ->
     ok;
 notify_callers_closed([{_Xid, {_Op, From}}|Left]) ->
     gen_server:reply(From, {error, closed}),
+    notify_callers_closed(Left);
+notify_callers_closed([{_Xid, {_Op, From, _Path, _Watcher}}|Left]) ->
+    gen_server:reply(From, {error, closed}),
     notify_callers_closed(Left).
 
 store_watcher(Op, Path, Watcher, Watchers) when not is_binary(Path)->
