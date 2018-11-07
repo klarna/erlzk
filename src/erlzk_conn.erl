@@ -50,10 +50,10 @@
     socket,
     host,
     port,
-    proto_ver,
+    proto_ver = 0,
     timeout,
-    session_id,
-    password,
+    session_id = 0,
+    password = <<0:128>>,
     ping_interval = infinity,
     xid = 1,
     zxid = 0,
@@ -151,59 +151,20 @@ unblock_incoming_data(Pid) ->
 %% gen_server Callbacks
 %% ===================================================================
 init([ServerList, Timeout, Options]) ->
-    Monitor = proplists:get_value(monitor, Options),
-    ResetWatch = case proplists:get_value(disable_watch_auto_reset, Options) of
-        true  -> false;
-        _     -> true
-    end,
-    ReconnectExpired = case proplists:get_value(disable_expire_reconnect, Options) of
-        true  -> false;
-        _     -> true
-    end,
-    AuthData = case proplists:get_value(auth_data, Options) of
-        undefined -> [];
-        AdValue   -> AdValue
-    end,
-    Chroot = case proplists:get_value(chroot, Options) of
-        undefined -> "/";
-        BinValue when is_binary(BinValue) -> get_chroot_path(binary_to_list(BinValue));
-        CrValue   -> get_chroot_path(CrValue)
-    end,
-    process_flag(trap_exit, true),
-    case resolve_servers(ServerList) of
-        {ok, []} ->
-            {stop, no_servers};
-        {ok, ResolvedServerList} ->
-            DedupedServerList = lists:usort(ResolvedServerList),
-            ShuffledServerList = shuffle(DedupedServerList),
-
-            ProtocolVersion = 0,
-            Zxid = 0,
-            SessionId = 0,
-            Password = <<0:128>>,
-            case connect(ShuffledServerList, ProtocolVersion, Zxid, Timeout, SessionId, Password) of
-                {ok, State=#state{host=Host, port=Port, ping_interval=PingIntv}} ->
-                    NewState = add_init_auths(State#state{auth_data=AuthData, chroot=Chroot,
-                                                          reset_watch=ResetWatch, reconnect_expired=ReconnectExpired,
-                                                          monitor=Monitor}),
-                    notify_monitor_server_state(Monitor, connected, Host, Port),
-                    {ok, NewState, PingIntv};
-                {error, Reason} ->
-                    error_logger:error_msg("Connect failed: ~p, will try again after ~pms~n", [Reason, ?ZK_RECONNECT_INTERVAL]),
-                    erlang:send_after(?ZK_RECONNECT_INTERVAL, self(), reconnect),
-                    State = #state{servers=ShuffledServerList, auth_data=AuthData, chroot=Chroot,
-                                   proto_ver=ProtocolVersion, timeout=Timeout, session_id=SessionId, password=Password,
-                                   reset_watch=ResetWatch, reconnect_expired=ReconnectExpired, monitor=Monitor},
-                    {ok, State}
-            end;
-        {error, Reason} ->
-            {stop, Reason}
-    end.
+    State = connect(#state{servers = ServerList,
+                           auth_data = proplists:get_value(auth_data, Options, []),
+                           chroot = get_chroot_path(proplists:get_value(chroot, Options, "/")),
+                           timeout = Timeout,
+                           reset_watch = not proplists:get_bool(disable_watch_auto_reset, Options),
+                           reconnect_expired = not proplists:get_bool(disable_expire_reconnect, Options),
+                           monitor = proplists:get_value(monitor, Options)
+                          }),
+    {ok, State, State#state.ping_interval}.
 
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
-handle_call(_, _From, State=#state{socket=undefined, ping_interval=PingIntv}) ->
-    {reply, {error, closed}, State, PingIntv};
+handle_call(_, _From, State=#state{socket=undefined}) ->
+    {reply, {error, closed}, State};
 handle_call({add_auth, Args}, From, State=#state{socket=Socket, ping_interval=PingIntv, auths=Auths}) ->
     case gen_tcp:send(Socket, erlzk_codec:pack(add_auth, Args, -4)) of
         ok ->
@@ -229,29 +190,30 @@ handle_call({Op, Args, Watcher}, From, State=#state{chroot=Chroot, socket=Socket
         {error, Reason} ->
             {reply, {error, Reason}, State#state{xid=Xid+1}, PingIntv}
     end;
-handle_call(kill_session, _From, State=#state{servers=ServerList, proto_ver=ProtoVer, zxid=Zxid,
-                                              timeout=Timeout, session_id=SessionId, password=Passwd,
-                                              ping_interval=PingIntv}) ->
+handle_call(kill_session, _From, State=#state{ping_interval=PingIntv}) ->
     % create a second connection for this zk session then close it - this is the approved
     % way to make a zk session timeout.
-    case connect(ServerList, ProtoVer, Zxid, Timeout, SessionId, Passwd) of
-        {ok, #state{socket=Socket, heartbeat_watcher=HeartbeatWatcher}} ->
-            stop_heartbeat(HeartbeatWatcher),
-            inet:setopts(Socket, [{active, false}]),
-            close_connection(Socket),
-            {reply, ok, State, PingIntv};
-        {error, Reason} ->
-            {reply, {error, Reason}, State, PingIntv}
+    case connect(State#state{socket = undefined,
+                             host = undefined,
+                             port = undefined,
+                             monitor = undefined,
+                             heartbeat_watcher = undefined,
+                             reqs = dict:new(),
+                             auths = queue:new()
+                            }) of
+        #state{socket = undefined} ->
+            {reply, {error, connect_failed}, State, PingIntv};
+        SecondState ->
+            disconnect(SecondState, true),
+            {reply, ok, State, PingIntv}
     end;
 handle_call(_Request, _From, State=#state{ping_interval=PingIntv}) ->
     {noreply, State, PingIntv}.
 
-handle_cast(no_heartbeat, State=#state{host=Host, port=Port, monitor=Monitor, socket=Socket}) ->
+handle_cast(no_heartbeat, State=#state{host=Host, port=Port}) ->
     error_logger:error_msg("Connection to ~p:~p is not responding, will close and reconnect~n", [Host, Port]),
-    close_connection(Socket, false),
-    notify_monitor_server_state(Monitor, disconnected, Host, Port),
-    State1 = notify_callers_closed(State),
-    reconnect(State1);
+    NewState = sync_reconnect(State),
+    {noreply, NewState, NewState#state.ping_interval};
 handle_cast(block_incoming_data, State=#state{socket=Socket, ping_interval=PingIntv}) ->
     %% block incoming data by setting the socket to passive mode
     inet:setopts(Socket, [{active, false}]),
@@ -263,8 +225,8 @@ handle_cast(unblock_incoming_data, State=#state{socket=Socket, ping_interval=Pin
 handle_cast(_Request, State=#state{ping_interval=PingIntv}) ->
     {noreply, State, PingIntv}.
 
-handle_info(timeout, State=#state{socket=undefined, ping_interval=PingIntv}) ->
-    {noreply, State, PingIntv};
+handle_info(timeout, State=#state{socket=undefined}) ->
+    {noreply, State};
 handle_info(timeout, State=#state{socket=Socket, ping_interval=PingIntv}) ->
     gen_tcp:send(Socket, <<-2:32, 11:32>>),
     {noreply, State, PingIntv};
@@ -320,46 +282,33 @@ handle_info({tcp, Socket, Packet}, State=#state{chroot=Chroot, socket=Socket, pi
                     {noreply, State#state{zxid=Zxid}, PingIntv}
             end
     end;
-handle_info({tcp_closed, Socket}, State=#state{socket=Socket, host=Host, port=Port, monitor=Monitor, heartbeat_watcher=HeartbeatWatcher}) ->
+handle_info({tcp_closed, Socket}, State=#state{socket=Socket, host=Host, port=Port}) ->
     error_logger:error_msg("Connection to ~p:~p is broken, reconnecting now~n", [Host, Port]),
-    stop_heartbeat(HeartbeatWatcher),
-    notify_monitor_server_state(Monitor, disconnected, Host, Port),
-    State1 = notify_callers_closed(State),
-    reconnect(State1#state{socket=undefined, heartbeat_watcher=undefined});
-handle_info({tcp_error, Socket, Reason}, State=#state{socket=Socket, host=Host, port=Port, monitor=Monitor, heartbeat_watcher=HeartbeatWatcher}) ->
+    NewState = sync_reconnect(State),
+    {noreply, NewState, NewState#state.ping_interval};
+handle_info({tcp_error, Socket, Reason}, State=#state{socket=Socket, host=Host, port=Port}) ->
     error_logger:error_msg("Connection to ~p:~p encountered an error, will close and reconnect: ~p~n", [Host, Port, Reason]),
-    close_connection(Socket, false),
-    stop_heartbeat(HeartbeatWatcher),
-    notify_monitor_server_state(Monitor, disconnected, Host, Port),
-    State1 = notify_callers_closed(State),
-    reconnect(State1#state{socket=undefined, heartbeat_watcher=undefined});
+    NewState = sync_reconnect(State),
+    {noreply, NewState, NewState#state.ping_interval};
 handle_info(reconnect, State) ->
-    reconnect(State);
+    NewState = connect(State),
+    {noreply, NewState, NewState#state.ping_interval};
 handle_info({'DOWN', Ref, process, Pid, Reason}, State=#state{heartbeat_watcher={Pid, Ref}}) ->
-    maybe_restart_heartbeat(Reason, State);
+    error_logger:warning_msg("Heartbeat process exit: ~p~n", [Reason]),
+    NewState = start_heartbeat(State),
+    {noreply, NewState, NewState#state.ping_interval};
 handle_info({'DOWN', _Ref, process, _Pid, _Reason}, State=#state{ping_interval=PingIntv}) ->
     {noreply, State, PingIntv};
-handle_info({'EXIT', _Ref, Reason}, State) ->
-    {stop, Reason, State};
 handle_info(_Info, State=#state{ping_interval=PingIntv}) ->
     {noreply, State, PingIntv}.
 
-terminate(normal, #state{socket=Socket, heartbeat_watcher=HeartbeatWatcher}) ->
-    stop_heartbeat(HeartbeatWatcher),
-    close_connection(Socket),
-    error_logger:info_msg("Server is closed~n"),
-    ok;
-terminate(shutdown, #state{socket=Socket, heartbeat_watcher=HeartbeatWatcher}) ->
-    stop_heartbeat(HeartbeatWatcher),
-    close_connection(Socket),
-    error_logger:info_msg("Server is shutdown~n"),
-    ok;
-terminate(Reason, #state{socket=Socket, heartbeat_watcher=HeartbeatWatcher}) ->
-    error_logger:error_msg("Connection terminating with reason: ~p~n", [Reason]),
-    stop_heartbeat(HeartbeatWatcher),
-    close_connection(Socket),
-    error_logger:error_msg("Server is terminated: ~p~n", [Reason]),
-    ok.
+terminate(Reason, State) ->
+    disconnect(State, true),
+    case Reason of
+        normal   -> error_logger:info_msg("Server is closed~n");
+        shutdown -> error_logger:info_msg("Server is shutting down~n");
+        _        -> error_logger:error_msg("Server is terminated: ~p~n", [Reason])
+    end.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -367,133 +316,175 @@ code_change(_OldVsn, State, _Extra) ->
 %% ===================================================================
 %% Internal Functions
 %% ===================================================================
-resolve_servers(ServerList) ->
-    resolve_servers(ServerList, []).
-
-resolve_servers([], ResolvedServerAcc) ->
-    {ok, lists:flatten(ResolvedServerAcc)};
-resolve_servers([Server|Left], ResolvedServerAcc) ->
-    case resolve_server(Server) of
-        {ok, Servers} ->
-            resolve_servers(Left, [Servers | ResolvedServerAcc]);
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-resolve_server({Host, Port}) ->
-    case inet:gethostbyname(Host) of
-        {ok, #hostent{h_addr_list=Addresses}} ->
-            {ok, [{Address, Port} || Address <- Addresses]};
-        {error, nxdomain} ->
-            error_logger:error_msg("Resolving ~p:~p encountered an error: nxdomain~n", [Host, Port]),
-            {ok, []};
-        {error, Reason} ->
-            error_logger:error_msg("Resolving ~p:~p encountered an error: ~p~n", [Host, Port, Reason]),
-            {error, Reason}
-    end.
 
 shuffle(L) ->
     % Uses rand module rather than random when available, so initial seed is not constant and list is shuffled differently on first call
     [X||{_,X} <- lists:sort([{?RANDOM_UNIFORM, N} || N <- L])].
 
-connect(ServerList, ProtocolVersion, LastZxidSeen, Timeout, LastSessionId, LastPassword) ->
-    connect(ServerList, ProtocolVersion, LastZxidSeen, Timeout, LastSessionId, LastPassword, []).
+sync_reconnect(State) ->
+    connect(disconnect(State)).
 
-connect([], _ProtocolVersion, _LastZxidSeen, _Timeout, _LastSessionId, _LastPassword, _FailedServerList) ->
-    {error, no_available_server};
-connect([Server={Host,Port}|Left], ProtocolVersion, LastZxidSeen, Timeout, LastSessionId, LastPassword, FailedServerList) ->
+disconnect(State) ->
+    disconnect(State, false).
+
+disconnect(State=#state{socket = undefined}, _CloseSession) ->
+    %% Already disconnected
+    State;
+disconnect(State=#state{session_id = SessionId,
+                        socket = Socket,
+                        host = Host,
+                        port = Port,
+                        heartbeat_watcher = {HBPid, HBMon},
+                        monitor = Monitor,
+                        reqs = Reqs,
+                        auths = Auths
+                       },
+           CloseSession) ->
+    %% Close the connection (and the session too, when necessary)
+    NewSessionId =
+        if CloseSession ->
+                inet:setopts(Socket, ?ZK_SOCKET_OPTS_CLOSE),
+                gen_tcp:send(Socket, <<1:32, -11:32>>),
+                <<0:128>>;
+           true ->
+                SessionId
+        end,
+    gen_tcp:close(Socket),
+    %% Stop heartbeat
+    demonitor(HBMon, [flush]),
+    erlzk_heartbeat:stop(HBPid),
+    %% Notify monitor and pending requests
+    notify_monitor_server_state(Monitor, disconnected, Host, Port),
+    lists:foreach(fun notify_req_closed/1, dict:to_list(Reqs)),
+    lists:foreach(fun notify_auth_closed/1, queue:to_list(Auths)),
+    %% Clear state
+    State#state{session_id = NewSessionId,
+                socket = undefined,
+                host = undefined,
+                port = undefined,
+                heartbeat_watcher = undefined,
+                reqs = dict:new(),
+                auths = queue:new(),
+                ping_interval = infinity
+               }.
+
+notify_req_closed({_Xid, {_Op, From}}) ->
+    gen_server:reply(From, {error, closed});
+notify_req_closed({_Xid, {_Op, From, _Path, _Watcher}}) ->
+    gen_server:reply(From, {error, closed}).
+
+notify_auth_closed(init_auth) ->
+    ok;
+notify_auth_closed({From, _Auth}) ->
+    gen_server:reply(From, {error, closed}).
+
+connect(State=#state{socket = Socket}) when Socket =/= undefined ->
+    %% Already connected
+    State;
+connect(State=#state{servers = Servers}) ->
+    %% Resolve the server names to IP addresses upon every reconnect
+    %% attempt. This way we can handle both round-robin DNS names and
+    %% DNS name changes.
+    ResolvedServers = [{Address, Port}
+                       || {Host, Port} <- Servers,
+                          Address <- case inet:gethostbyname(Host) of
+                                         {ok, #hostent{h_addr_list = Addresses}} -> Addresses;
+                                         {error, Reason} ->
+                                             error_logger:error_msg("Resolving ~p:~p encountered an error: ~p~n",
+                                                                    [Host, Port, Reason]),
+                                             []
+                                     end
+                      ],
+    case connect(shuffle(ResolvedServers), State) of
+        {error, Retry} ->
+            %% Maybe try again later
+            if Retry -> erlang:send_after(?ZK_RECONNECT_INTERVAL, self(), reconnect);
+               true -> ok
+            end,
+            State;
+        {ok, NewState = #state{host = Host, port = Port, monitor = Monitor}} ->
+            %% Notify monitor
+            notify_monitor_server_state(Monitor, connected, Host, Port),
+            %% Restore session state
+            reset_watch(add_init_auths(start_heartbeat(NewState)))
+    end.
+
+connect([], _State) ->
+    {error, true};
+connect([{Host, Port} | Rest] = Servers, State = #state{reconnect_expired = ReconnectExpired, monitor = Monitor}) ->
+    case connect(Host, Port, State) of
+        {ok, _NewState} = Res -> Res;
+        {error, session_expired} when ReconnectExpired ->
+            error_logger:warning_msg("Session expired, reconnecting with a fresh session~n"),
+            notify_monitor_server_state(Monitor, expired, Host, Port),
+            connect(Servers, State#state{session_id = 0,
+                                         password = <<0:128>>,
+                                         proto_ver = 0,
+                                         xid = 1});
+        {error, session_expired} ->
+            error_logger:warning_msg("Session expired, will not reconnect"),
+            {error, false};
+        {error, _Other} ->
+            connect(Rest, State)
+    end.
+
+connect(Host, Port,
+        State = #state{proto_ver = ProtocolVersion,
+                       zxid = Zxid,
+                       timeout = Timeout,
+                       session_id = SessionId,
+                       password = Password
+                      }) ->
     error_logger:info_msg("Connecting to ~p:~p~n", [Host, Port]),
     case gen_tcp:connect(Host, Port, ?ZK_SOCKET_OPTS, ?ZK_CONNECT_TIMEOUT) of
         {ok, Socket} ->
             error_logger:info_msg("Connected ~p:~p, sending connect command~n", [Host, Port]),
-            case gen_tcp:send(Socket, erlzk_codec:pack(connect, {ProtocolVersion, LastZxidSeen, Timeout, LastSessionId, LastPassword})) of
+            ConnectMsg = erlzk_codec:pack(connect, {ProtocolVersion, Zxid, Timeout, SessionId, Password}),
+            case gen_tcp:send(Socket, ConnectMsg) of
                 ok ->
                     receive
                         {tcp, Socket, Packet} ->
-                            {ProtoVer, RealTimeOut, SessionId, Password} = erlzk_codec:unpack(connect, Packet),
-                            case SessionId of
+                            {NewProtocolVersion, NewTimeout, NewSessionId, NewPassword} =
+                                erlzk_codec:unpack(connect, Packet),
+                            case NewSessionId of
                                 0 ->
-                                    error_logger:warning_msg("Session expired, connection to ~p:~p will be closed~n", [Host, Port]),
                                     gen_tcp:close(Socket),
-                                    {error, {session_expired, Host, Port}};
+                                    {error, session_expired};
                                 _ ->
                                     error_logger:info_msg("Connection to ~p:~p is established~n", [Host, Port]),
-                                    {ok, HeartbeatWatcher} = erlzk_heartbeat:start(self(), RealTimeOut * 2 div 3),
-                                    ServerList = Left ++ lists:reverse([Server|FailedServerList]),
-                                    {ok, #state{servers=ServerList, socket=Socket, host=Host, port=Port,
-                                                proto_ver=ProtoVer, timeout=RealTimeOut, session_id=SessionId, password=Password,
-                                                ping_interval=(RealTimeOut div 3), heartbeat_watcher={HeartbeatWatcher, erlang:monitor(process, HeartbeatWatcher)}}}
+                                    {ok, State#state{socket = Socket,
+                                                     host = Host,
+                                                     port = Port,
+                                                     proto_ver = NewProtocolVersion,
+                                                     timeout = NewTimeout,
+                                                     session_id = NewSessionId,
+                                                     password = NewPassword,
+                                                     ping_interval = NewTimeout div 3
+                                                    }}
                             end;
                         {tcp_closed, Socket} ->
                             error_logger:error_msg("Connection to ~p:~p is closed~n", [Host, Port]),
-                            connect(Left, ProtocolVersion, LastZxidSeen, Timeout, LastSessionId, LastPassword, [Server|FailedServerList]);
+                            {error, tcp_closed};
                         {tcp_error, Socket, Reason} ->
-                            error_logger:error_msg("Connection to ~p:~p encountered an error: ~p~n", [Host, Port, Reason]),
+                            error_logger:error_msg("Connection to ~p:~p encountered an error: ~p~n",
+                                                   [Host, Port, Reason]),
                             gen_tcp:close(Socket),
-                            connect(Left, ProtocolVersion, LastZxidSeen, Timeout, LastSessionId, LastPassword, [Server|FailedServerList])
+                            {error, tcp_error}
                     after ?ZK_CONNECT_TIMEOUT ->
-                        error_logger:error_msg("Connection to ~p:~p timeout~n", [Host, Port]),
-                        gen_tcp:close(Socket),
-                        connect(Left, ProtocolVersion, LastZxidSeen, Timeout, LastSessionId, LastPassword, [Server|FailedServerList])
+                            error_logger:error_msg("Connection to ~p:~p timeout~n", [Host, Port]),
+                            gen_tcp:close(Socket),
+                            {error, timeout}
                     end;
                 {error, Reason} ->
-                    error_logger:error_msg("Sending connect command to ~p:~p encountered an error: ~p~n", [Host, Port, Reason]),
+                    error_logger:error_msg("Sending connect command to ~p:~p encountered an error: ~p~n",
+                                           [Host, Port, Reason]),
                     gen_tcp:close(Socket),
-                    connect(Left, ProtocolVersion, LastZxidSeen, Timeout, LastSessionId, LastPassword, [Server|FailedServerList])
+                    {error, tcp_send}
             end;
         {error, Reason} ->
             error_logger:error_msg("Connecting to ~p:~p encountered an error: ~p~n", [Host, Port, Reason]),
-            connect(Left, ProtocolVersion, LastZxidSeen, Timeout, LastSessionId, LastPassword, [Server|FailedServerList])
+            {error, tcp_connect}
     end.
-
-reconnect(State=#state{servers=ServerList, auth_data=AuthData, chroot=Chroot,
-                       proto_ver=ProtoVer, zxid=Zxid, timeout=Timeout, session_id=SessionId, password=Passwd,
-                       xid=Xid, reset_watch=ResetWatch, reconnect_expired=ReconnectExpired,
-                       monitor=Monitor, watchers=Watchers}) ->
-    case connect(ServerList, ProtoVer, Zxid, Timeout, SessionId, Passwd) of
-        {ok, NewState=#state{host=Host, port=Port, ping_interval=PingIntv, heartbeat_watcher=HeartbeatWatcher}} ->
-            error_logger:warning_msg("Reconnect to ~p:~p successful~n", [Host, Port]),
-            RenewState = restore_session_state(NewState#state{auth_data=AuthData, chroot=Chroot, xid=Xid, zxid=Zxid,
-                                                              reset_watch=ResetWatch, watchers=Watchers,
-                                                              reconnect_expired=ReconnectExpired,
-                                                              monitor=Monitor, heartbeat_watcher=HeartbeatWatcher}),
-            notify_monitor_server_state(Monitor, connected, Host, Port),
-            {noreply, RenewState, PingIntv};
-        {error, {session_expired, Host, Port}} ->
-            notify_monitor_server_state(Monitor, expired, Host, Port),
-            case ReconnectExpired of
-                true ->
-                    error_logger:warning_msg("Session expired, creating new connection now"),
-                    reconnect_after_session_expired(State);
-                false ->
-                    error_logger:warning_msg("Session expired, will not reconnect"),
-                    {noreply, State}
-            end;
-        {error, Reason} ->
-            error_logger:error_msg("Connect fail: ~p, will be try again after ~pms~n", [Reason, ?ZK_RECONNECT_INTERVAL]),
-            erlang:send_after(?ZK_RECONNECT_INTERVAL, self(), reconnect),
-            {noreply, State}
-    end.
-
-reconnect_after_session_expired(State=#state{servers=ServerList, auth_data=AuthData, chroot=Chroot,
-                                             timeout=Timeout, reset_watch=ResetWatch, monitor=Monitor, watchers=Watchers}) ->
-    case connect(ServerList, 0, 0, Timeout, 0, <<0:128>>) of
-        {ok, NewState=#state{host=Host, port=Port, ping_interval=PingIntv, heartbeat_watcher=HeartbeatWatcher}} ->
-            error_logger:warning_msg("Creating a new connection to ~p:~p successful~n", [Host, Port]),
-            RenewState = restore_session_state(NewState#state{auth_data=AuthData, chroot=Chroot,
-                                                              reset_watch=ResetWatch, watchers=Watchers,
-                                                              monitor=Monitor,
-                                                              heartbeat_watcher=HeartbeatWatcher}),
-            notify_monitor_server_state(Monitor, connected, Host, Port),
-            {noreply, RenewState, PingIntv};
-        {error, Reason} ->
-            error_logger:error_msg("Connect failed: ~p, will try again after ~pms~n", [Reason, ?ZK_RECONNECT_INTERVAL]),
-            erlang:send_after(?ZK_RECONNECT_INTERVAL, self(), reconnect),
-            {noreply, State}
-    end.
-
-restore_session_state(State) ->
-    reset_watch(add_init_auths(State)).
 
 add_init_auths(State=#state{auth_data=AuthData, auths=Auths, socket=Socket, host=Host, port=Port}) ->
     NewAuths = lists:foldl(
@@ -551,21 +542,6 @@ maybe_store_watcher(Code, {Op, _From, Path, Watcher}, Watchers) ->
         true -> store_watcher(Op, Path, Watcher, Watchers)
     end.
 
-notify_callers_closed(State=#state{reqs=Reqs, auths=Auths}) ->
-    lists:foreach(fun notify_req_closed/1, dict:to_list(Reqs)),
-    lists:foreach(fun notify_auth_closed/1, queue:to_list(Auths)),
-    State#state{reqs=dict:new(), auths=queue:new()}.
-
-notify_req_closed({_Xid, {_Op, From}}) ->
-    gen_server:reply(From, {error, closed});
-notify_req_closed({_Xid, {_Op, From, _Path, _Watcher}}) ->
-    gen_server:reply(From, {error, closed}).
-
-notify_auth_closed(init_auth) ->
-    ok;
-notify_auth_closed({From, _Auth}) ->
-    gen_server:reply(From, {error, closed}).
-
 store_watcher(Op, Path, Watcher, Watchers) when not is_binary(Path)->
     store_watcher(Op, iolist_to_binary(Path), Watcher, Watchers);
 store_watcher(Op, Path, Watcher, Watchers) ->
@@ -611,26 +587,13 @@ send_watched_event([Watcher|Left], Path, EventType) ->
     Watcher ! {EventType, Path},
     send_watched_event(Left, Path, EventType).
 
-get_chroot_path(P) -> get_chroot_path0(lists:reverse(P)).
-get_chroot_path0("/" ++ P) -> get_chroot_path0(P);
-get_chroot_path0(P) -> lists:reverse(P).
-
-close_connection(Socket) ->
-    close_connection(Socket, true).
-
-close_connection(undefined, _) ->
-    ok;
-close_connection(Socket, true) ->
-    inet:setopts(Socket, ?ZK_SOCKET_OPTS_CLOSE),
-    gen_tcp:send(Socket, <<1:32, -11:32>>),
-    gen_tcp:close(Socket);
-close_connection(Socket, false) ->
-    gen_tcp:close(Socket).
-
-stop_heartbeat(undefined) -> ok;
-stop_heartbeat({HeartbeatWatcher, HeartbeatRef}) ->
-    erlang:demonitor(HeartbeatRef),
-    erlzk_heartbeat:stop(HeartbeatWatcher).
+get_chroot_path(P) when is_binary(P) ->
+    get_chroot_path(unicode:characters_to_list(P));
+get_chroot_path(P) when is_list(P) ->
+    case string:strip(P, right, $/) of
+        "" -> "/";
+        Path -> Path
+    end.
 
 get_reply_from_body(ok, _Op, <<>>, _Chroot) -> ok;
 get_reply_from_body(ok, Op, Body, Chroot) ->
@@ -643,11 +606,6 @@ multi_result(multi, {ok, _}=Result) -> Result;
 multi_result(multi, Result)         -> {error, Result};
 multi_result(_, Result)             -> {ok, Result}.
 
-maybe_restart_heartbeat(normal, State=#state{ping_interval=PingIntv}) ->
-    {noreply, State#state{heartbeat_watcher=undefined}, PingIntv};
-maybe_restart_heartbeat(shutdown, State=#state{ping_interval=PingIntv}) ->
-    {noreply, State#state{heartbeat_watcher=undefined}, PingIntv};
-maybe_restart_heartbeat(Reason, State=#state{timeout=TimeOut, ping_interval=PingIntv}) ->
-    error_logger:warning_msg("Heartbeat process exit: ~p~n", [Reason]),
-    {ok, NewHeartbeatWatcher} = erlzk_heartbeat:start(self(), TimeOut * 2 div 3),
-    {noreply, State#state{heartbeat_watcher={NewHeartbeatWatcher, erlang:monitor(process, NewHeartbeatWatcher)}}, PingIntv}.
+start_heartbeat(State = #state{timeout=Timeout}) ->
+    {ok, Pid} = erlzk_heartbeat:start(self(), Timeout * 2 div 3),
+    State#state{heartbeat_watcher = {Pid, erlang:monitor(process, Pid)}}.
