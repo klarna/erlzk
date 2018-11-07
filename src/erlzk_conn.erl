@@ -82,64 +82,64 @@ start_link(ServerName, ServerList, Timeout, Options) ->
     gen_server:start_link(ServerName, ?MODULE, [ServerList, Timeout, Options], []).
 
 stop(Pid) ->
-    gen_server:call(Pid, stop).
+    gen_server:call(Pid, stop, infinity).
 
 create(Pid, Path, Data, Acl, CreateMode) ->
-    op_call(Pid, {create, {Path, Data, Acl, CreateMode}}).
+    gen_server:call(Pid, {create, {Path, Data, Acl, CreateMode}}, infinity).
 
 delete(Pid, Path, Version) ->
-    op_call(Pid, {delete, {Path, Version}}).
+    gen_server:call(Pid, {delete, {Path, Version}}, infinity).
 
 exists(Pid, Path, Watch) ->
-    op_call(Pid, {exists, {Path, Watch}}).
+    gen_server:call(Pid, {exists, {Path, Watch}}, infinity).
 
 exists(Pid, Path, Watch, Watcher) ->
-    op_call(Pid, {exists, {Path, Watch}, Watcher}).
+    gen_server:call(Pid, {exists, {Path, Watch}, Watcher}, infinity).
 
 get_data(Pid, Path, Watch) ->
-    op_call(Pid, {get_data, {Path, Watch}}).
+    gen_server:call(Pid, {get_data, {Path, Watch}}, infinity).
 
 get_data(Pid, Path, Watch, Watcher) ->
-    op_call(Pid, {get_data, {Path, Watch}, Watcher}).
+    gen_server:call(Pid, {get_data, {Path, Watch}, Watcher}, infinity).
 
 set_data(Pid, Path, Data, Version) ->
-    op_call(Pid, {set_data, {Path, Data, Version}}).
+    gen_server:call(Pid, {set_data, {Path, Data, Version}}, infinity).
 
 get_acl(Pid, Path) ->
-    op_call(Pid, {get_acl, {Path}}).
+    gen_server:call(Pid, {get_acl, {Path}}, infinity).
 
 set_acl(Pid, Path, Acl, Version) ->
-    op_call(Pid, {set_acl, {Path, Acl, Version}}).
+    gen_server:call(Pid, {set_acl, {Path, Acl, Version}}, infinity).
 
 get_children(Pid, Path, Watch) ->
-    op_call(Pid, {get_children, {Path, Watch}}).
+    gen_server:call(Pid, {get_children, {Path, Watch}}, infinity).
 
 get_children(Pid, Path, Watch, Watcher) ->
-    op_call(Pid, {get_children, {Path, Watch}, Watcher}).
+    gen_server:call(Pid, {get_children, {Path, Watch}, Watcher}, infinity).
 
 sync(Pid, Path) ->
-    op_call(Pid, {sync, {Path}}).
+    gen_server:call(Pid, {sync, {Path}}, infinity).
 
 get_children2(Pid, Path, Watch) ->
-    op_call(Pid, {get_children2, {Path, Watch}}).
+    gen_server:call(Pid, {get_children2, {Path, Watch}}, infinity).
 
 get_children2(Pid, Path, Watch, Watcher) ->
-    op_call(Pid, {get_children2, {Path, Watch}, Watcher}).
+    gen_server:call(Pid, {get_children2, {Path, Watch}, Watcher}, infinity).
 
 multi(Pid, Ops) ->
-    op_call(Pid, {multi, Ops}).
+    gen_server:call(Pid, {multi, Ops}, infinity).
 
 create2(Pid, Path, Data, Acl, CreateMode) ->
-    op_call(Pid, {create2, {Path, Data, Acl, CreateMode}}).
+    gen_server:call(Pid, {create2, {Path, Data, Acl, CreateMode}}, infinity).
 
 add_auth(Pid, Scheme, Auth) ->
-    op_call(Pid, {add_auth, {Scheme, Auth}}).
+    gen_server:call(Pid, {add_auth, {Scheme, Auth}}, infinity).
 
 no_heartbeat(Pid) ->
     gen_server:cast(Pid, no_heartbeat).
 
 kill_session(Pid) ->
-    gen_server:call(Pid, kill_session).
+    gen_server:call(Pid, kill_session, infinity).
 
 block_incoming_data(Pid) ->
     gen_server:cast(Pid, block_incoming_data).
@@ -183,10 +183,9 @@ init([ServerList, Timeout, Options]) ->
             Password = <<0:128>>,
             case connect(ShuffledServerList, ProtocolVersion, Zxid, Timeout, SessionId, Password) of
                 {ok, State=#state{host=Host, port=Port, ping_interval=PingIntv}} ->
-                    NewState = State#state{auth_data=AuthData, chroot=Chroot,
-                                           reset_watch=ResetWatch, reconnect_expired=ReconnectExpired,
-                                           monitor=Monitor},
-                    add_init_auths(AuthData, NewState),
+                    NewState = add_init_auths(State#state{auth_data=AuthData, chroot=Chroot,
+                                                          reset_watch=ResetWatch, reconnect_expired=ReconnectExpired,
+                                                          monitor=Monitor}),
                     notify_monitor_server_state(Monitor, connected, Host, Port),
                     {ok, NewState, PingIntv};
                 {error, Reason} ->
@@ -201,8 +200,6 @@ init([ServerList, Timeout, Options]) ->
             {stop, Reason}
     end.
 
-handle_call(get_timeout, _From, State=#state{timeout=Timeout, ping_interval=PingIntv}) ->
-    {reply, {ok, Timeout}, State, PingIntv};
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 handle_call(_, _From, State=#state{socket=undefined, ping_interval=PingIntv}) ->
@@ -210,15 +207,8 @@ handle_call(_, _From, State=#state{socket=undefined, ping_interval=PingIntv}) ->
 handle_call({add_auth, Args}, From, State=#state{socket=Socket, ping_interval=PingIntv, auths=Auths}) ->
     case gen_tcp:send(Socket, erlzk_codec:pack(add_auth, Args, -4)) of
         ok ->
-            NewAuths = queue:in(From, Auths),
+            NewAuths = queue:in({From, Args}, Auths),
             {noreply, State#state{auths=NewAuths}, PingIntv};
-        {error, Reason} ->
-            {reply, {error, Reason}, State, PingIntv}
-    end;
-handle_call({set_watches, Args}, _From, State=#state{socket=Socket, ping_interval=PingIntv}) ->
-    case gen_tcp:send(Socket, erlzk_codec:pack(set_watches, Args, -8)) of
-        ok ->
-            {noreply, State, PingIntv};
         {error, Reason} ->
             {reply, {error, Reason}, State, PingIntv}
     end;
@@ -279,7 +269,7 @@ handle_info(timeout, State=#state{socket=Socket, ping_interval=PingIntv}) ->
     gen_tcp:send(Socket, <<-2:32, 11:32>>),
     {noreply, State, PingIntv};
 handle_info({tcp, Socket, Packet}, State=#state{chroot=Chroot, socket=Socket, ping_interval=PingIntv,
-                                               auths=Auths, reqs=Reqs, watchers=Watchers,
+                                               auths=Auths, auth_data=AuthData, reqs=Reqs, watchers=Watchers,
                                                heartbeat_watcher={HeartbeatWatcher, _HeartbeatRef}}) ->
     {Xid, Zxid, Code, Body} = erlzk_codec:unpack(Packet),
     erlzk_heartbeat:beat(HeartbeatWatcher),
@@ -298,19 +288,22 @@ handle_info({tcp, Socket, Packet}, State=#state{chroot=Chroot, socket=Socket, pi
                 _  -> {noreply, State#state{zxid=Zxid, watchers={dict:new(), dict:new(), dict:new()}}, PingIntv}
             end;
         -4 -> % auth
-            case queue:out(Auths) of
-                {{value, From}, NewAuths} ->
-                    Reply = case Code of
-                        ok -> ok;
-                        _  -> {error, Code}
-                    end,
-                    if From =/= self() -> % init auth data reply don't need to notify
-                        gen_server:reply(From, Reply)
-                    end,
-                    {noreply, State#state{zxid=Zxid, auths=NewAuths}, PingIntv};
-                {empty, _} ->
-                    {noreply, State#state{zxid=Zxid}, PingIntv}
-            end;
+            NewAuthData =
+                case queue:out(Auths) of
+                    {{value, init_auth}, NewAuths} ->
+                        AuthData;
+                    {{value, {From, Auth}}, NewAuths} when Code =:= ok ->
+                        gen_server:reply(From, ok),
+                        [Auth | AuthData];
+                    {{value, {From, _Auth}}, NewAuths} ->
+                        gen_server:reply(From, {error, Code}),
+                        AuthData;
+                    {empty, NewAuths} ->
+                        error_logger:info_msg("Unexpected auth reply from ~p:~p (ignored)~n",
+                                              [State#state.host, State#state.port]),
+                        AuthData
+                end,
+            {noreply, State#state{zxid=Zxid, auths=NewAuths, auth_data=NewAuthData}, PingIntv};
         _  -> % normal reply
             case dict:find(Xid, Reqs) of
                 {ok, Req} ->
@@ -460,12 +453,12 @@ reconnect(State=#state{servers=ServerList, auth_data=AuthData, chroot=Chroot,
     case connect(ServerList, ProtoVer, Zxid, Timeout, SessionId, Passwd) of
         {ok, NewState=#state{host=Host, port=Port, ping_interval=PingIntv, heartbeat_watcher=HeartbeatWatcher}} ->
             error_logger:warning_msg("Reconnect to ~p:~p successful~n", [Host, Port]),
-            RenewState = NewState#state{auth_data=AuthData, chroot=Chroot, xid=Xid, zxid=Zxid,
-                                        reset_watch=ResetWatch, reconnect_expired=ReconnectExpired,
-                                        monitor=Monitor, heartbeat_watcher=HeartbeatWatcher, watchers=Watchers},
-            RenewState2 = reset_watch_return_new_state(RenewState, Watchers),
+            RenewState = restore_session_state(NewState#state{auth_data=AuthData, chroot=Chroot, xid=Xid, zxid=Zxid,
+                                                              reset_watch=ResetWatch, watchers=Watchers,
+                                                              reconnect_expired=ReconnectExpired,
+                                                              monitor=Monitor, heartbeat_watcher=HeartbeatWatcher}),
             notify_monitor_server_state(Monitor, connected, Host, Port),
-            {noreply, RenewState2, PingIntv};
+            {noreply, RenewState, PingIntv};
         {error, {session_expired, Host, Port}} ->
             notify_monitor_server_state(Monitor, expired, Host, Port),
             case ReconnectExpired of
@@ -487,10 +480,10 @@ reconnect_after_session_expired(State=#state{servers=ServerList, auth_data=AuthD
     case connect(ServerList, 0, 0, Timeout, 0, <<0:128>>) of
         {ok, NewState=#state{host=Host, port=Port, ping_interval=PingIntv, heartbeat_watcher=HeartbeatWatcher}} ->
             error_logger:warning_msg("Creating a new connection to ~p:~p successful~n", [Host, Port]),
-            RenewState = reset_watch_return_new_state(NewState#state{auth_data=AuthData, chroot=Chroot,
-                                                                     reset_watch=ResetWatch, monitor=Monitor,
-                                                                     heartbeat_watcher=HeartbeatWatcher}, Watchers),
-            add_init_auths(AuthData, RenewState),
+            RenewState = restore_session_state(NewState#state{auth_data=AuthData, chroot=Chroot,
+                                                              reset_watch=ResetWatch, watchers=Watchers,
+                                                              monitor=Monitor,
+                                                              heartbeat_watcher=HeartbeatWatcher}),
             notify_monitor_server_state(Monitor, connected, Host, Port),
             {noreply, RenewState, PingIntv};
         {error, Reason} ->
@@ -499,22 +492,41 @@ reconnect_after_session_expired(State=#state{servers=ServerList, auth_data=AuthD
             {noreply, State}
     end.
 
-op_call(Pid, Message) ->
-    {ok, Timeout} = gen_server:call(Pid, get_timeout),
-    gen_server:call(Pid, Message, Timeout).
+restore_session_state(State) ->
+    reset_watch(add_init_auths(State)).
 
-add_init_auths([], _State) ->
-    ok;
-add_init_auths([AuthData|Left], State) ->
-    handle_call({add_auth, AuthData}, self(), State),
-    add_init_auths(Left, State).
+add_init_auths(State=#state{auth_data=AuthData, auths=Auths, socket=Socket, host=Host, port=Port}) ->
+    NewAuths = lists:foldl(
+                 fun (Args, Queue) ->
+                         case gen_tcp:send(Socket, erlzk_codec:pack(add_auth, Args, -4)) of
+                             ok ->
+                                 queue:in(init_auth, Queue);
+                             {error, Reason} ->
+                                 error_logger:error_msg("Error sending an init auth to ~p:~p (~p)~n",
+                                                        [Host, Port, Reason]),
+                                 Queue
+                         end
+                 end,
+                 Auths,
+                 AuthData),
+    State#state{auths=NewAuths}.
 
-reset_watch_return_new_state(State=#state{zxid=Zxid, reset_watch=ResetWatch}, Watchers={DataWatchers, ExistWatchers, ChildWatchers}) ->
-    case ResetWatch of
-        true  ->
+reset_watch(State=#state{reset_watch = ResetWatch, watchers={DataWatchers, ExistWatchers, ChildWatchers}, zxid=Zxid,
+                         socket=Socket, host=Host, port=Port}) ->
+    case ResetWatch andalso
+        not (dict:is_empty(DataWatchers) andalso
+             dict:is_empty(ExistWatchers) andalso
+             dict:is_empty(ChildWatchers)) of
+        true ->
             Args = {Zxid, dict:fetch_keys(DataWatchers), dict:fetch_keys(ExistWatchers), dict:fetch_keys(ChildWatchers)},
-            handle_call({set_watches, Args}, self(), State),
-            State#state{watchers=Watchers};
+            case gen_tcp:send(Socket, erlzk_codec:pack(set_watches, Args, -8)) of
+                ok ->
+                    State;
+                {error, Reason} ->
+                    error_logger:error_msg("Error resetting watches to ~p:~p (~p)~n",
+                                           [Host, Port, Reason]),
+                    State#state{watchers={dict:new(), dict:new(), dict:new()}}
+            end;
         false ->
             State#state{watchers={dict:new(), dict:new(), dict:new()}}
     end.
@@ -539,14 +551,20 @@ maybe_store_watcher(Code, {Op, _From, Path, Watcher}, Watchers) ->
         true -> store_watcher(Op, Path, Watcher, Watchers)
     end.
 
-notify_callers_closed(State=#state{reqs=Reqs}) ->
-    notify_callers_closed(dict:to_list(Reqs)),
-    State#state{reqs=dict:new()};
-notify_callers_closed([]) ->
+notify_callers_closed(State=#state{reqs=Reqs, auths=Auths}) ->
+    lists:foreach(fun notify_req_closed/1, dict:to_list(Reqs)),
+    lists:foreach(fun notify_auth_closed/1, queue:to_list(Auths)),
+    State#state{reqs=dict:new(), auths=queue:new()}.
+
+notify_req_closed({_Xid, {_Op, From}}) ->
+    gen_server:reply(From, {error, closed});
+notify_req_closed({_Xid, {_Op, From, _Path, _Watcher}}) ->
+    gen_server:reply(From, {error, closed}).
+
+notify_auth_closed(init_auth) ->
     ok;
-notify_callers_closed([{_Xid, {_Op, From}}|Left]) ->
-    gen_server:reply(From, {error, closed}),
-    notify_callers_closed(Left).
+notify_auth_closed({From, _Auth}) ->
+    gen_server:reply(From, {error, closed}).
 
 store_watcher(Op, Path, Watcher, Watchers) when not is_binary(Path)->
     store_watcher(Op, iolist_to_binary(Path), Watcher, Watchers);
