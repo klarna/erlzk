@@ -25,7 +25,7 @@
          multi/2, create2/5, add_auth/3, no_heartbeat/1,
          kill_session/1, block_incoming_data/1, unblock_incoming_data/1]).
 
--define(ZK_SOCKET_OPTS, [binary, {active, true}, {packet, 4}, {reuseaddr, true}, {linger, {false, 0}}]).
+-define(ZK_SOCKET_OPTS, [binary, {active, once}, {packet, 4}, {reuseaddr, true}, {linger, {false, 0}}]).
 -define(ZK_SOCKET_OPTS_CLOSE, [{linger, {true, 1}}]).
 -ifdef(zk_connect_timeout).
 -define(ZK_CONNECT_TIMEOUT, ?zk_connect_timeout).
@@ -220,7 +220,7 @@ handle_cast(block_incoming_data, State=#state{socket=Socket, ping_interval=PingI
     {noreply, State, PingIntv};
 handle_cast(unblock_incoming_data, State=#state{socket=Socket, ping_interval=PingIntv}) ->
     %% return the socket to active mode
-    inet:setopts(Socket, [{active, true}]),
+    inet:setopts(Socket, [{active, once}]),
     {noreply, State, PingIntv};
 handle_cast(_Request, State=#state{ping_interval=PingIntv}) ->
     {noreply, State, PingIntv}.
@@ -233,6 +233,7 @@ handle_info(timeout, State=#state{socket=Socket, ping_interval=PingIntv}) ->
 handle_info({tcp, Socket, Packet}, State=#state{chroot=Chroot, socket=Socket, ping_interval=PingIntv,
                                                auths=Auths, auth_data=AuthData, reqs=Reqs, watchers=Watchers,
                                                heartbeat_watcher={HeartbeatWatcher, _HeartbeatRef}}) ->
+    inet:setopts(Socket, [{active, once}]),
     {Xid, Zxid, Code, Body} = erlzk_codec:unpack(Packet),
     erlzk_heartbeat:beat(HeartbeatWatcher),
     case Xid of
@@ -444,6 +445,7 @@ connect(Host, Port,
                 ok ->
                     receive
                         {tcp, Socket, Packet} ->
+                            inet:setopts(Socket, [{active, once}]),
                             {NewProtocolVersion, NewTimeout, NewSessionId, NewPassword} =
                                 erlzk_codec:unpack(connect, Packet),
                             case NewSessionId of
