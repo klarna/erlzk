@@ -365,6 +365,18 @@ auth_data({ServerList, Timeout, _Chroot, AuthData}) ->
 
     {ok, Pid} = connect_and_wait(ServerList, Timeout, [{auth_data, AuthData}]),
     ?assertMatch({ok, "/a"}, erlzk:create(Pid, "/a", ?ZK_ACL_CREATOR_ALL_ACL)),
+
+    erlzk:kill_connection(Pid),
+    receive {connected, _, _} -> ok
+    after Timeout -> ?assert(false)
+    end,
+    ?assertMatch({ok, "/a/b"}, erlzk:create(Pid, "/a/b", ?ZK_ACL_CREATOR_ALL_ACL)),
+
+    erlzk:kill_session(Pid),
+    receive {connected, _, _} -> ok
+    after Timeout -> ?assert(false)
+    end,
+    ?assertMatch(ok, erlzk:delete(Pid, "/a/b")),
     ?assertMatch(ok, erlzk:delete(Pid, "/a")),
     ok.
 
@@ -629,7 +641,8 @@ closed({ServerList, Timeout, _Chroot, _AuthData}) ->
                                   {set_acl,      ["/a", ?ZK_ACL_CREATOR_ALL_ACL]},
                                   {get_children, ["/a"]},
                                   {get_children, ["/a", self()]},
-                                  {multi,        [[erlzk:op({create, "/a"}), erlzk:op({delete, "/a"})]]}
+                                  {multi,        [[erlzk:op({create, "/a"}), erlzk:op({delete, "/a"})]]},
+                                  {add_auth,     ["a", "b"]}
                                  ]
               ],
 
