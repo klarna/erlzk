@@ -171,7 +171,7 @@ handle_call({add_auth, Args}, From, State=#state{socket=Socket, ping_interval=Pi
             NewAuths = queue:in({From, Args}, Auths),
             {noreply, State#state{auths=NewAuths}, PingIntv};
         {error, Reason} ->
-            {reply, {error, Reason}, State, PingIntv}
+            {reply, {error, Reason}, async_reconnect(State)}
     end;
 handle_call({Op, Args}, From, State=#state{chroot=Chroot, socket=Socket, xid=Xid, ping_interval=PingIntv, reqs=Reqs}) ->
     case gen_tcp:send(Socket, erlzk_codec:pack(Op, Args, Xid, Chroot)) of
@@ -179,7 +179,7 @@ handle_call({Op, Args}, From, State=#state{chroot=Chroot, socket=Socket, xid=Xid
             NewReqs = dict:store(Xid, {Op, From}, Reqs),
             {noreply, State#state{xid=Xid+1, reqs=NewReqs}, PingIntv};
         {error, Reason} ->
-            {reply, {error, Reason}, State#state{xid=Xid+1}, PingIntv}
+            {reply, {error, Reason}, async_reconnect(State#state{xid=Xid+1})}
     end;
 handle_call({Op, Args, Watcher}, From, State=#state{chroot=Chroot, socket=Socket, xid=Xid, ping_interval=PingIntv, reqs=Reqs}) ->
     case gen_tcp:send(Socket, erlzk_codec:pack(Op, Args, Xid, Chroot)) of
@@ -188,7 +188,7 @@ handle_call({Op, Args, Watcher}, From, State=#state{chroot=Chroot, socket=Socket
             NewReqs = dict:store(Xid, {Op, From, Path, Watcher}, Reqs),
             {noreply, State#state{xid=Xid+1, reqs=NewReqs}, PingIntv};
         {error, Reason} ->
-            {reply, {error, Reason}, State#state{xid=Xid+1}, PingIntv}
+            {reply, {error, Reason}, async_reconnect(State#state{xid=Xid+1})}
     end;
 handle_call(kill_session, _From, State=#state{ping_interval=PingIntv}) ->
     % create a second connection for this zk session then close it - this is the approved
@@ -230,65 +230,40 @@ handle_info(timeout, State=#state{socket=undefined}) ->
 handle_info(timeout, State=#state{socket=Socket, ping_interval=PingIntv}) ->
     gen_tcp:send(Socket, <<-2:32, 11:32>>),
     {noreply, State, PingIntv};
-handle_info({tcp, Socket, Packet}, State=#state{chroot=Chroot, socket=Socket, ping_interval=PingIntv,
-                                               auths=Auths, auth_data=AuthData, reqs=Reqs, watchers=Watchers,
-                                               heartbeat_watcher={HeartbeatWatcher, _HeartbeatRef}}) ->
+handle_info({tcp, Socket, Packet}, State=#state{socket=Socket, host=Host, port=Port, heartbeat_watcher={Pid, _Mon}}) ->
     inet:setopts(Socket, [{active, once}]),
-    {Xid, Zxid, Code, Body} = erlzk_codec:unpack(Packet),
-    erlzk_heartbeat:beat(HeartbeatWatcher),
-    case Xid of
-        -1 -> % watched event
-            {EventType, _KeeperState, PathList} = erlzk_codec:unpack(watched_event, Body, Chroot),
-            Path = list_to_binary(PathList),
-            {Receivers, NewWatchers} = find_and_erase_watchers(EventType, Path, Watchers),
-            send_watched_event(Receivers, Path, EventType),
-            {noreply, State#state{zxid=Zxid, watchers=NewWatchers}, PingIntv};
-        -2 -> % ping
-            {noreply, State#state{zxid=Zxid}, PingIntv};
-        -8 -> % set watches
-            case Code of
-                ok -> {noreply, State#state{zxid=Zxid}, PingIntv};
-                _  -> {noreply, State#state{zxid=Zxid, watchers={dict:new(), dict:new(), dict:new()}}, PingIntv}
-            end;
-        -4 -> % auth
-            NewAuthData =
-                case queue:out(Auths) of
-                    {{value, init_auth}, NewAuths} ->
-                        AuthData;
-                    {{value, {From, Auth}}, NewAuths} when Code =:= ok ->
-                        gen_server:reply(From, ok),
-                        [Auth | AuthData];
-                    {{value, {From, _Auth}}, NewAuths} ->
-                        gen_server:reply(From, {error, Code}),
-                        AuthData;
-                    {empty, NewAuths} ->
-                        error_logger:info_msg("Unexpected auth reply from ~p:~p (ignored)~n",
-                                              [State#state.host, State#state.port]),
-                        AuthData
-                end,
-            {noreply, State#state{zxid=Zxid, auths=NewAuths, auth_data=NewAuthData}, PingIntv};
-        _  -> % normal reply
-            case dict:find(Xid, Reqs) of
-                {ok, Req} ->
-                    {Op, From} = case Req of
-                        {X, Y}       -> {X, Y};
-                        {X, Y, _, _} -> {X, Y}
-                    end,
-                    NewReqs = dict:erase(Xid, Reqs),
-                    Reply = get_reply_from_body(Code, Op, Body, Chroot),
-                    NewWatchers = maybe_store_watcher(Code, Req, Watchers),
-                    gen_server:reply(From, Reply),
-                    {noreply, State#state{zxid=Zxid, reqs=NewReqs, watchers=NewWatchers}, PingIntv};
-                error ->
-                    {noreply, State#state{zxid=Zxid}, PingIntv}
-            end
-    end;
+    erlzk_heartbeat:beat(Pid),
+    NewState = try erlzk_codec:unpack(Packet) of
+                   {Xid, Zxid, Code, Body} ->
+                       case handle_response(Xid, Code, Body, State) of
+                           {ok, S} ->
+                               S#state{zxid=Zxid};
+                           {error, Msg} ->
+                               error_logger:error_msg(
+                                 "Error handling message from ~p:~p, will close and reconnect: ~s~n"
+                                 "  xid=~p~n"
+                                 "  zxid=~p~n"
+                                 "  code=~p~n"
+                                 "  body=~p~n",
+                                 [Host, Port, Msg, Xid, Zxid, Code, Body]),
+                               sync_reconnect(State)
+                       end
+               catch
+                   _:_ ->
+                       error_logger:error_msg("Error handling message from ~p:~p, will close and reconnect: "
+                                              "unable to decode packet~n"
+                                              "  packed=~p~n",
+                                              [Host, Port, Packet]),
+                       sync_reconnect(State)
+               end,
+    {noreply, NewState, NewState#state.ping_interval};
 handle_info({tcp_closed, Socket}, State=#state{socket=Socket, host=Host, port=Port}) ->
     error_logger:error_msg("Connection to ~p:~p is broken, reconnecting now~n", [Host, Port]),
     NewState = sync_reconnect(State),
     {noreply, NewState, NewState#state.ping_interval};
 handle_info({tcp_error, Socket, Reason}, State=#state{socket=Socket, host=Host, port=Port}) ->
-    error_logger:error_msg("Connection to ~p:~p encountered an error, will close and reconnect: ~p~n", [Host, Port, Reason]),
+    error_logger:error_msg("Connection to ~p:~p encountered an error, will close and reconnect: ~p~n",
+                           [Host, Port, Reason]),
     NewState = sync_reconnect(State),
     {noreply, NewState, NewState#state.ping_interval};
 handle_info(reconnect, State) ->
@@ -321,6 +296,10 @@ code_change(_OldVsn, State, _Extra) ->
 shuffle(L) ->
     % Uses rand module rather than random when available, so initial seed is not constant and list is shuffled differently on first call
     [X||{_,X} <- lists:sort([{?RANDOM_UNIFORM, N} || N <- L])].
+
+async_reconnect(State) ->
+    self() ! reconnect,
+    disconnect(State).
 
 sync_reconnect(State) ->
     connect(disconnect(State)).
@@ -446,13 +425,11 @@ connect(Host, Port,
                     receive
                         {tcp, Socket, Packet} ->
                             inet:setopts(Socket, [{active, once}]),
-                            {NewProtocolVersion, NewTimeout, NewSessionId, NewPassword} =
-                                erlzk_codec:unpack(connect, Packet),
-                            case NewSessionId of
-                                0 ->
+                            try erlzk_codec:unpack(connect, Packet) of
+                                {_NewProtocolVersion, _NewTimeout, 0, _NewPassword} ->
                                     gen_tcp:close(Socket),
                                     {error, session_expired};
-                                _ ->
+                                {NewProtocolVersion, NewTimeout, NewSessionId, NewPassword} ->
                                     error_logger:info_msg("Connection to ~p:~p is established~n", [Host, Port]),
                                     {ok, State#state{socket = Socket,
                                                      host = Host,
@@ -463,6 +440,11 @@ connect(Host, Port,
                                                      password = NewPassword,
                                                      ping_interval = NewTimeout div 3
                                                     }}
+                            catch
+                                _:_ ->
+                                    error_logger:error_msg("Error decoding message from ~p:~p~n", [Host, Port]),
+                                    gen_tcp:close(Socket),
+                                    {error, invalid_response}
                             end;
                         {tcp_closed, Socket} ->
                             error_logger:error_msg("Connection to ~p:~p is closed~n", [Host, Port]),
@@ -488,22 +470,32 @@ connect(Host, Port,
             {error, tcp_connect}
     end.
 
+add_init_auths(State=#state{socket=undefined}) ->
+    %% Already disconnected due to some error
+    State;
 add_init_auths(State=#state{auth_data=AuthData, auths=Auths, socket=Socket, host=Host, port=Port}) ->
-    NewAuths = lists:foldl(
-                 fun (Args, Queue) ->
-                         case gen_tcp:send(Socket, erlzk_codec:pack(add_auth, Args, -4)) of
-                             ok ->
-                                 queue:in(init_auth, Queue);
-                             {error, Reason} ->
-                                 error_logger:error_msg("Error sending an init auth to ~p:~p (~p)~n",
-                                                        [Host, Port, Reason]),
-                                 Queue
-                         end
-                 end,
-                 Auths,
-                 AuthData),
-    State#state{auths=NewAuths}.
+    try lists:foldl(
+          fun (Args, Queue) ->
+                  case gen_tcp:send(Socket, erlzk_codec:pack(add_auth, Args, -4)) of
+                      ok ->
+                          queue:in(init_auth, Queue);
+                      {error, _} = Error ->
+                          throw(Error)
+                  end
+          end,
+          Auths,
+          AuthData) of
+        NewAuths -> State#state{auths=NewAuths}
+    catch
+        {error, Reason} ->
+            error_logger:error_msg("Error sending init auth to ~p:~p, will close and reconnect: ~p~n",
+                                   [Host, Port, Reason]),
+            async_reconnect(State)
+    end.
 
+reset_watch(State=#state{socket=undefined}) ->
+    %% Already disconnected due to some error
+    State;
 reset_watch(State=#state{reset_watch = ResetWatch, watchers={DataWatchers, ExistWatchers, ChildWatchers}, zxid=Zxid,
                          socket=Socket, host=Host, port=Port}) ->
     case ResetWatch andalso
@@ -516,12 +508,66 @@ reset_watch(State=#state{reset_watch = ResetWatch, watchers={DataWatchers, Exist
                 ok ->
                     State;
                 {error, Reason} ->
-                    error_logger:error_msg("Error resetting watches to ~p:~p (~p)~n",
+                    error_logger:error_msg("Error resetting watches to ~p:~p, will close and reconnect: ~p~n",
                                            [Host, Port, Reason]),
-                    State#state{watchers={dict:new(), dict:new(), dict:new()}}
+                    async_reconnect(State)
             end;
         false ->
             State#state{watchers={dict:new(), dict:new(), dict:new()}}
+    end.
+
+handle_response(-1, _Code, Body, State=#state{chroot=Chroot, watchers=Watchers}) ->
+    %% Watched event
+    try erlzk_codec:unpack(watched_event, Body, Chroot) of
+        {EventType, _KeeperState, PathList} ->
+            Path = list_to_binary(PathList),
+            {Receivers, NewWatchers} = find_and_erase_watchers(EventType, Path, Watchers),
+            send_watched_event(Receivers, Path, EventType),
+            {ok, State#state{watchers=NewWatchers}}
+    catch
+        _:_ -> {error, "unable to decode message"}
+    end;
+handle_response(-2, _Code, _Body, State) ->
+    %% Ping
+    {ok, State};
+handle_response(-8, Code, _Body, State) ->
+    %% Set watches
+    case Code of
+        ok -> {ok, State};
+        _  -> {error, "resetting the watches failed"}
+    end;
+handle_response(-4, Code, _Body, State=#state{auths=Auths, auth_data=AuthData}) ->
+    %% Auth
+    case queue:out(Auths) of
+        {{value, init_auth}, NewAuths} ->
+            {ok, State#state{auths=NewAuths}};
+        {{value, {From, Auth}}, NewAuths} when Code =:= ok ->
+            gen_server:reply(From, ok),
+            {ok, State#state{auths=NewAuths, auth_data=[Auth|AuthData]}};
+        {{value, {From, _Auth}}, NewAuths} ->
+            gen_server:reply(From, {error, Code}),
+            {ok, State#state{auths=NewAuths}};
+        {empty, _NewAuths} ->
+            {error, "unexpected auth reply"}
+    end;
+handle_response(Xid, Code, Body, State=#state{reqs=Reqs, watchers=Watchers, chroot=Chroot}) ->
+    case dict:find(Xid, Reqs) of
+        {ok, Req} ->
+            {Op, From} = case Req of
+                             {X, Y}       -> {X, Y};
+                             {X, Y, _, _} -> {X, Y}
+                         end,
+            NewReqs = dict:erase(Xid, Reqs),
+            try get_reply_from_body(Code, Op, Body, Chroot) of
+                Reply ->
+                    NewWatchers = maybe_store_watcher(Code, Req, Watchers),
+                    gen_server:reply(From, Reply),
+                    {ok, State#state{reqs=NewReqs, watchers=NewWatchers}}
+            catch
+                _:_ -> {error, "unable to decode message"}
+            end;
+        error ->
+            {error, "unexpected response"}
     end.
 
 notify_monitor_server_state(Monitor, State, Host, Port) ->
