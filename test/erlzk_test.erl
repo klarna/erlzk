@@ -531,35 +531,23 @@ reconnect_to_same({ServerList, Timeout, _Chroot, _AuthData}) ->
     ok.
 
 reconnect_to_different({ServerList, Timeout, _Chroot, _AuthData}) ->
-    %% Connect to ZK and make note of the ZK host selected by the
-    %% connection process
-    {ok, Pid} = erlzk:connect(ServerList, Timeout, [{monitor, self()}]),
-    {Host, Port} = receive
-                       {connected, H, P} -> {H, P}
-                   after
-                       Timeout ->  ?assert(false)
-                   end,
+    %% First, allow the connection to use only one ZK server
+    [FirstServer | RestOfTheServers] = ServerList,
+    {ok, Pid} = connect_and_wait([FirstServer], Timeout),
 
     ExistCreateWatch = ?spawn_watch({node_created, <<"/a">>}),
     ?assertMatch({error, no_node}, erlzk:exists(Pid, "/a", ExistCreateWatch)),
 
     %% To ensure the connection will be established towards a
-    %% different ZK host, remove the current server from the state of
-    %% `Pid'
-    sys:replace_state(Pid,
-                      fun (State) ->
-                              OldServers = element(2, State),
-                              NewServers = lists:delete({Host, Port}, OldServers),
-                              setelement(2, State, NewServers)
-                      end,
-                      infinity),
-    erlzk:kill_connection(Pid),
+    %% different ZK host, replace the server list in the state
+    erlzk:change_servers(Pid, RestOfTheServers, true),
 
-    receive
-        DisconnectedMsg -> ?assertEqual({disconnected, Host, Port}, DisconnectedMsg)
-    after
-        Timeout -> ?assert(false)
-    end,
+    {Host, Port} = receive
+                       {disconnected, H, P} -> {H, P}
+                   after
+                       Timeout -> ?assert(false),
+                                  {undefined, undefined}
+                   end,
     receive
         ReconnectedMsg -> ?assertMatch({connected, NewHost, NewPort} when NewHost =/= Host orelse NewPort =/= Port,
                                        ReconnectedMsg)

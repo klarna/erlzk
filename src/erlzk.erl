@@ -1,5 +1,6 @@
 %% 2013-2014 (c) Mega Yu <yuhg2310@gmail.com>
 %% 2013-2014 (c) huaban.com <www.huaban.com>
+%% 2018      (c) Klarna Bank AB
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,7 +19,7 @@
 
 -include("erlzk.hrl").
 
--export([start/0, stop/0, connect/2, connect/3, connect/4, close/1,
+-export([start/0, stop/0, connect/2, connect/3, connect/4, close/1, change_servers/2, change_servers/3,
          kill_connection/1, kill_session/1, block_incoming_data/1, unblock_incoming_data/1]).
 -export([create/2, create/3, create/4, create/5, delete/2, delete/3, exists/2, exists/3,
          get_data/2, get_data/3, set_data/3, set_data/4, get_acl/2, set_acl/3, set_acl/4,
@@ -120,6 +121,27 @@ unblock_incoming_data(Pid) ->
 -spec close(pid()) -> ok.
 close(Pid) ->
     erlzk_conn:stop(Pid).
+
+%% @doc Change the ZooKeeper server list in the client.
+%% The change will take effect the next time the client needs to reconnect to ZooKeeper.
+%%
+%% This operation is useful when a ZooKeeper cluster is scaled up or
+%% down.
+-spec change_servers(pid(), server_list()) -> ok.
+change_servers(Pid, ServerList) ->
+    change_servers(Pid, ServerList, false).
+
+%% @doc Change the ZooKeeper server list in the client.
+%% If `Reconnect' is `true', the client will close its current
+%% ZooKeeper connection and reconnect to one of the newly supplied
+%% servers. Otherwise the change will take effect the next time the
+%% client needs to reconnect to ZooKeeper.
+%%
+%% This operation is useful when a ZooKeeper cluster is scaled up or
+%% down.
+-spec change_servers(pid(), server_list(), boolean()) -> ok.
+change_servers(Pid, ServerList, Reconnect) ->
+    erlzk_conn:change_servers(Pid, ServerList, Reconnect).
 
 %% ===================================================================
 %% ZooKeeper API

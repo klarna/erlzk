@@ -19,7 +19,7 @@ before using erlzk.
 
 ## Installation
 
-Download the sources from our [Github repository](http://github.com/huaban/erlzk)
+Download the sources from our [Github repository](http://github.com/klarna/erlzk)
 
 To build the application simply run `make`. This should build .beam, .app files.
 
@@ -32,7 +32,7 @@ Or add it to your rebar config
 ```erlang
 {deps, [
     ....
-    {erlzk, ".*", {git, "git://github.com/huaban/erlzk.git", {tag, "v0.6.2"}}}
+    {erlzk, ".*", {git, "git://github.com/klarna/erlzk.git", {tag, "v0.6.2"}}}
 ]}.
 ```
 
@@ -268,4 +268,5 @@ See erlzk.erl for more details, all the functions you need are in this module.
 
 ## License
 
-Copyright (c) 2013 Mega Yu & Huaban.com. Distributed under the Apache License 2.0. See LICENSE for further details.
+Copyright (c) 2013 Mega Yu & Huaban.com, 2018 Klarna Bank AB.
+Distributed under the Apache License 2.0. See LICENSE for further details.
