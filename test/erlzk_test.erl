@@ -540,12 +540,7 @@ reconnect_to_different({ServerList, Timeout, _Chroot, _AuthData}) ->
 
     %% To ensure the connection will be established towards a
     %% different ZK host, replace the server list in the state
-    sys:replace_state(Pid,
-                      fun (State) ->
-                              setelement(2, State, RestOfTheServers)
-                      end,
-                      infinity),
-    erlzk:kill_connection(Pid),
+    erlzk:change_servers(Pid, RestOfTheServers, true),
 
     {Host, Port} = receive
                        {disconnected, H, P} -> {H, P}

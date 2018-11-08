@@ -18,7 +18,7 @@
 -include("erlzk.hrl").
 -include_lib("kernel/include/inet.hrl").
 
--export([start/3, start/4, start_link/3, start_link/4, stop/1]).
+-export([start/3, start/4, start_link/3, start_link/4, stop/1, change_servers/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 -export([create/5, delete/3, exists/3, exists/4, get_data/3, get_data/4, set_data/4, get_acl/2, set_acl/4,
          get_children/3, get_children/4, sync/2, get_children2/3, get_children2/4,
@@ -83,6 +83,9 @@ start_link(ServerName, ServerList, Timeout, Options) ->
 
 stop(Pid) ->
     gen_server:call(Pid, stop, infinity).
+
+change_servers(Pid, ServerList, Reconnect) ->
+    gen_server:call(Pid, {change_servers, ServerList, Reconnect}, infinity).
 
 create(Pid, Path, Data, Acl, CreateMode) ->
     gen_server:call(Pid, {create, {Path, Data, Acl, CreateMode}}, infinity).
@@ -161,6 +164,11 @@ init([ServerList, Timeout, Options]) ->
                           }),
     {ok, State, State#state.ping_interval}.
 
+handle_call({change_servers, ServerList, false}, _From, State = #state{ping_interval=PingIntv}) ->
+    {reply, ok, State#state{servers = ServerList}, PingIntv};
+handle_call({change_servers, ServerList, true}, _From, State) ->
+    NewState = sync_reconnect(State#state{servers = ServerList}),
+    {reply, ok, NewState, NewState#state.ping_interval};
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 handle_call(_, _From, State=#state{socket=undefined}) ->
