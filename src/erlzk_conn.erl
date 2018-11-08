@@ -1,5 +1,6 @@
 %% 2013-2014 (c) Mega Yu <yuhg2310@gmail.com>
 %% 2013-2014 (c) huaban.com <www.huaban.com>
+%% 2018      (c) Klarna Bank AB
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
