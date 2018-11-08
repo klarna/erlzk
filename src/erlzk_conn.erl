@@ -54,7 +54,7 @@
     proto_ver = 0,
     timeout,
     session_id = 0,
-    password = <<0:128>>,
+    password = fun def_pwd/0,
     ping_interval = infinity,
     xid = 1,
     zxid = 0,
@@ -407,7 +407,7 @@ connect([{Host, Port} | Rest] = Servers, State = #state{reconnect_expired = Reco
             error_logger:warning_msg("Session expired, reconnecting with a fresh session~n"),
             notify_monitor_server_state(Monitor, expired, Host, Port),
             connect(Servers, State#state{session_id = 0,
-                                         password = <<0:128>>,
+                                         password = fun def_pwd/0,
                                          proto_ver = 0,
                                          xid = 1});
         {error, session_expired} ->
@@ -428,7 +428,7 @@ connect(Host, Port,
     case gen_tcp:connect(Host, Port, ?ZK_SOCKET_OPTS, ?ZK_CONNECT_TIMEOUT) of
         {ok, Socket} ->
             error_logger:info_msg("Connected ~p:~p, sending connect command~n", [Host, Port]),
-            ConnectMsg = erlzk_codec:pack(connect, {ProtocolVersion, Zxid, Timeout, SessionId, Password}),
+            ConnectMsg = erlzk_codec:pack(connect, {ProtocolVersion, Zxid, Timeout, SessionId, Password()}),
             case gen_tcp:send(Socket, ConnectMsg) of
                 ok ->
                     receive
@@ -446,7 +446,7 @@ connect(Host, Port,
                                                      proto_ver = NewProtocolVersion,
                                                      timeout = NewTimeout,
                                                      session_id = NewSessionId,
-                                                     password = NewPassword,
+                                                     password = fun () -> NewPassword end,
                                                      ping_interval = NewTimeout div 3
                                                     }}
                             catch
@@ -666,3 +666,6 @@ multi_result(_, Result)             -> {ok, Result}.
 start_heartbeat(State = #state{timeout=Timeout}) ->
     {ok, Pid} = erlzk_heartbeat:start(self(), Timeout * 2 div 3),
     State#state{heartbeat_watcher = {Pid, erlang:monitor(process, Pid)}}.
+
+def_pwd() ->
+    <<0:128>>.
