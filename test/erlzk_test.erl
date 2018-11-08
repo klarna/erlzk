@@ -66,7 +66,8 @@ setup_docker() ->
     case string:str(Stacks, ?MODULE_STRING) of
         0 ->
             %% Start the Docker stack
-            os:cmd("docker stack deploy -c ../test/erlzk.yaml " ?MODULE_STRING),
+            YamlFile = filename:join(code:lib_dir(erlzk, test), "erlzk.yaml"),
+            os:cmd("docker stack deploy -c " ++ YamlFile ++ " " ?MODULE_STRING),
             true;
         _Exists ->
             %% The Docker stack is already running, leave it intact
@@ -80,7 +81,8 @@ cleanup_docker(true) ->
 
 setup() ->
     erlzk:start(),
-    {ok, [ServerList, Timeout, Chroot, AuthData]} = file:consult("../test/erlzk.conf"),
+    ConfFile = filename:join(code:lib_dir(erlzk, test), "erlzk.conf"),
+    {ok, [ServerList, Timeout, Chroot, AuthData]} = file:consult(ConfFile),
     {ServerList, Timeout, Chroot, AuthData}.
 
 create({ServerList, Timeout, _Chroot, _AuthData}) ->
