@@ -22,7 +22,7 @@ start(ConnPid, Interval) ->
     gen_server:start(?MODULE, [ConnPid, Interval], []).
 
 stop(Pid) ->
-    gen_server:call(Pid, stop).
+    gen_server:cast(Pid, stop).
 
 beat(Pid) ->
     gen_server:cast(Pid, beat).
@@ -33,11 +33,11 @@ beat(Pid) ->
 init([ConnPid, Interval]) ->
     {ok, #state{pid=ConnPid, interval=Interval}, Interval}.
 
-handle_call(stop, _From, State) ->
-    {stop, normal, ok, State};
 handle_call(_Request, _From, State=#state{interval=Interval}) ->
     {reply, ok, State, Interval}.
 
+handle_cast(stop, State) ->
+    {stop, normal, State};
 handle_cast(_Request, State=#state{interval=Interval}) ->
     {noreply, State, Interval}.
 
