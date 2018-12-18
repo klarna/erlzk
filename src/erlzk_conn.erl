@@ -343,7 +343,14 @@ disconnect(State=#state{session_id = SessionId,
     demonitor(HBMon, [flush]),
     erlzk_heartbeat:stop(HBPid),
     %% Notify monitor and pending requests
-    notify_monitor_server_state(Monitor, disconnected, Host, Port),
+    notify_monitor_server_state(Monitor, disconnected, #{host => Host,
+                                                         port => Port,
+                                                         session_id => SessionId}),
+    if CloseSession ->
+            notify_monitor_server_state(Monitor, expired, #{session_id => SessionId});
+       true ->
+            ok
+    end,
     lists:foreach(fun notify_req_closed/1, dict:to_list(Reqs)),
     lists:foreach(fun notify_auth_closed/1, queue:to_list(Auths)),
     %% Clear state
@@ -391,27 +398,33 @@ connect(State=#state{servers = Servers}) ->
                true -> ok
             end,
             State;
-        {ok, NewState = #state{host = Host, port = Port, monitor = Monitor}} ->
+        {ok, NewState = #state{host = Host, port = Port, monitor = Monitor, session_id = SessionId, timeout = Timeout}} ->
             %% Notify monitor
-            notify_monitor_server_state(Monitor, connected, Host, Port),
+            notify_monitor_server_state(Monitor, connected, #{host => Host,
+                                                              port => Port,
+                                                              session_id => SessionId,
+                                                              timeout => Timeout
+                                                             }),
             %% Restore session state
             reset_watch(add_init_auths(start_heartbeat(NewState)))
     end.
 
 connect([], _State) ->
     {error, true};
-connect([{Host, Port} | Rest] = Servers, State = #state{reconnect_expired = ReconnectExpired, monitor = Monitor}) ->
+connect([{Host, Port} | Rest] = Servers,
+        State = #state{reconnect_expired = ReconnectExpired, monitor = Monitor, session_id = SessionId}) ->
     case connect(Host, Port, State) of
         {ok, _NewState} = Res -> Res;
         {error, session_expired} when ReconnectExpired ->
             error_logger:warning_msg("Session expired, reconnecting with a fresh session~n"),
-            notify_monitor_server_state(Monitor, expired, Host, Port),
+            notify_monitor_server_state(Monitor, expired, #{session_id => SessionId}),
             connect(Servers, State#state{session_id = 0,
                                          password = fun def_pwd/0,
                                          proto_ver = 0,
                                          xid = 1});
         {error, session_expired} ->
             error_logger:warning_msg("Session expired, will not reconnect"),
+            notify_monitor_server_state(Monitor, expired, #{session_id => SessionId}),
             {error, false};
         {error, _Other} ->
             connect(Rest, State)
@@ -579,12 +592,12 @@ handle_response(Xid, Code, Body, State=#state{reqs=Reqs, watchers=Watchers, chro
             {error, "unexpected response"}
     end.
 
-notify_monitor_server_state(Monitor, State, Host, Port) ->
+notify_monitor_server_state(Monitor, State, Details) ->
     case Monitor of
         undefined ->
             ok;
         _ ->
-            Monitor ! {State, Host, Port}
+            Monitor ! {self(), State, Details}
     end.
 
 should_add_watcher(no_node, exists) -> true;

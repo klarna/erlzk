@@ -369,13 +369,13 @@ auth_data({ServerList, Timeout, _Chroot, AuthData}) ->
     ?assertMatch({ok, "/a"}, erlzk:create(Pid, "/a", ?ZK_ACL_CREATOR_ALL_ACL)),
 
     erlzk:kill_connection(Pid),
-    receive {connected, _, _} -> ok
+    receive {Pid, connected, _} -> ok
     after Timeout -> ?assert(false)
     end,
     ?assertMatch({ok, "/a/b"}, erlzk:create(Pid, "/a/b", ?ZK_ACL_CREATOR_ALL_ACL)),
 
     erlzk:kill_session(Pid),
-    receive {connected, _, _} -> ok
+    receive {Pid, connected, _} -> ok
     after Timeout -> ?assert(false)
     end,
     ?assertMatch(ok, erlzk:delete(Pid, "/a/b")),
@@ -515,12 +515,12 @@ reconnect_to_same({ServerList, Timeout, _Chroot, _AuthData}) ->
     erlzk:kill_connection(Pid),
 
     receive
-        DisconnectedMsg -> ?assertEqual({disconnected, Addr, Port}, DisconnectedMsg)
+        DisconnectedMsg -> ?assertMatch({Pid, disconnected, #{host := Addr, port := Port}}, DisconnectedMsg)
     after
         Timeout -> ?assert(false)
     end,
     receive
-        ReconnectedMsg -> ?assertEqual({connected, Addr, Port}, ReconnectedMsg)
+        ReconnectedMsg -> ?assertMatch({Pid, connected, #{host := Addr, port := Port}}, ReconnectedMsg)
     after
         Timeout -> ?assert(false)
     end,
@@ -545,14 +545,15 @@ reconnect_to_different({ServerList, Timeout, _Chroot, _AuthData}) ->
     erlzk:change_servers(Pid, RestOfTheServers, true),
 
     {Host, Port} = receive
-                       {disconnected, H, P} -> {H, P}
+                       {Pid, disconnected, #{host := H, port := P}} -> {H, P}
                    after
                        Timeout -> ?assert(false),
                                   {undefined, undefined}
                    end,
     receive
-        ReconnectedMsg -> ?assertMatch({connected, NewHost, NewPort} when NewHost =/= Host orelse NewPort =/= Port,
-                                       ReconnectedMsg)
+        ReconnectedMsg ->
+            ?assertMatch({Pid, connected, #{host := NewHost, port := NewPort}} when NewHost =/= Host orelse NewPort =/= Port,
+                         ReconnectedMsg)
     after
         Timeout -> ?assert(false)
     end,
@@ -588,7 +589,7 @@ reconnect_with_stale_watches({ServerList, Timeout, _Chroot, _AuthData}) ->
 
     erlzk:kill_connection(Pid),
     receive
-        {connected, _Host, _Port} -> ok
+        {Pid, connected, _} -> ok
     after
         Timeout -> ?assert(false)
     end,
@@ -673,7 +674,7 @@ connect_and_wait(ServerList, Timeout) ->
 connect_and_wait(ServerList, Timeout, Options) ->
     {ok, Pid} = erlzk:connect(ServerList, Timeout, [{monitor, self()} | Options]),
     receive
-        {connected, _Host, _Port} -> {ok, Pid}
+        {Pid, connected, _} -> {ok, Pid}
     after
         Timeout -> ?assert(false)
     end.

@@ -97,11 +97,12 @@ the options parameter is a `proplists`, support 5 option types:
 + monitor: a process receiving the message of connection state changing
 
 If you set monitor, each time erlzk is disconnected or reconnected or (reconnected after) session expired,
-will send monitor a message in the form of {State, Host, Port}, there are 3 states:
+will send monitor a message in the form of `{Pid, State, Details}`, where `Details` is a map containing some
+information relevant for the `State`. The `State` itself can be one of 3 values:
 
-+ disconnected
-+ connected
-+ expired
++ `disconnected`, in which case the details will contain the `host`, `port` and `session_id` keys.
++ `connected`, in which case the details will contain the `host`, `port`, `session_id` and `timeout` keys.
++ `expired`, in which case the details will only contain the `session_id` key.
 
 ```erlang
 {ok, Pid} = erlzk:connect([{"localhost", 2181}], 30000, [{chroot, "/zk"},
