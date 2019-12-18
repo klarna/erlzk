@@ -302,6 +302,8 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Functions
 %% ===================================================================
 
+shuffle(L) when length(L) == 1 ->
+    L;
 shuffle(L) ->
     % Uses rand module rather than random when available, so initial seed is not constant and list is shuffled differently on first call
     [X||{_,X} <- lists:sort([{?RANDOM_UNIFORM, N} || N <- L])].
@@ -384,14 +386,14 @@ connect(State=#state{servers = Servers}) ->
     ResolvedServers = [{Address, Port}
                        || {Host, Port} <- Servers,
                           Address <- case inet:gethostbyname(Host) of
-                                         {ok, #hostent{h_addr_list = Addresses}} -> Addresses;
+                                         {ok, #hostent{h_addr_list = Addresses}} -> shuffle(Addresses);
                                          {error, Reason} ->
                                              error_logger:error_msg("Resolving ~p:~p encountered an error: ~p~n",
                                                                     [Host, Port, Reason]),
                                              []
                                      end
                       ],
-    case connect(shuffle(ResolvedServers), State) of
+    case connect(ResolvedServers, rotate_server(State)) of
         {error, Retry} ->
             %% Maybe try again later
             if Retry -> erlang:send_after(?ZK_RECONNECT_INTERVAL, self(), reconnect);
@@ -682,3 +684,6 @@ start_heartbeat(State = #state{timeout=Timeout}) ->
 
 def_pwd() ->
     <<0:128>>.
+
+rotate_server(#state{servers = [H|T]} = S) ->
+    S#state{servers = T ++ [H]}.
