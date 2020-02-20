@@ -440,7 +440,9 @@ connect(Host, Port,
                        password = Password
                       }) ->
     error_logger:info_msg("Connecting to ~p:~p~n", [Host, Port]),
-    case gen_tcp:connect(Host, Port, ?ZK_SOCKET_OPTS, ?ZK_CONNECT_TIMEOUT) of
+    %% pls ensure your OS timeout val is also configured accordingly.
+    TcpConnTimeout = application:get_env(erlzk, tcp_connect_timeout_ms, ?ZK_CONNECT_TIMEOUT),
+    case gen_tcp:connect(Host, Port, ?ZK_SOCKET_OPTS, TcpConnTimeout) of
         {ok, Socket} ->
             error_logger:info_msg("Connected ~p:~p, sending connect command~n", [Host, Port]),
             ConnectMsg = erlzk_codec:pack(connect, {ProtocolVersion, Zxid, Timeout, SessionId, Password()}),
