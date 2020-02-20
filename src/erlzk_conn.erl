@@ -396,7 +396,9 @@ connect(State=#state{servers = Servers}) ->
     case connect(ResolvedServers, rotate_server(State)) of
         {error, Retry} ->
             %% Maybe try again later
-            if Retry -> erlang:send_after(?ZK_RECONNECT_INTERVAL, self(), reconnect);
+            if Retry ->
+                    ReconnInterval = application:get_env(erlzk, zk_reconn_interval_ms, ?ZK_RECONNECT_INTERVAL),
+                    erlang:send_after(ReconnInterval, self(), reconnect);
                true -> ok
             end,
             State;
@@ -440,7 +442,10 @@ connect(Host, Port,
                        password = Password
                       }) ->
     error_logger:info_msg("Connecting to ~p:~p~n", [Host, Port]),
-    case gen_tcp:connect(Host, Port, ?ZK_SOCKET_OPTS, ?ZK_CONNECT_TIMEOUT) of
+    %% pls ensure your OS timeout val is also configured accordingly.
+    TcpConnTimeout = application:get_env(erlzk, tcp_connect_timeout_ms, ?ZK_CONNECT_TIMEOUT),
+    ZkConnTimeout  = application:get_env(erlzk, zk_connect_timeout_ms,  ?ZK_CONNECT_TIMEOUT),
+    case gen_tcp:connect(Host, Port, ?ZK_SOCKET_OPTS, TcpConnTimeout) of
         {ok, Socket} ->
             error_logger:info_msg("Connected ~p:~p, sending connect command~n", [Host, Port]),
             ConnectMsg = erlzk_codec:pack(connect, {ProtocolVersion, Zxid, Timeout, SessionId, Password()}),
@@ -478,7 +483,7 @@ connect(Host, Port,
                                                    [Host, Port, Reason]),
                             gen_tcp:close(Socket),
                             {error, tcp_error}
-                    after ?ZK_CONNECT_TIMEOUT ->
+                    after ZkConnTimeout ->
                             error_logger:error_msg("Connection to ~p:~p timeout~n", [Host, Port]),
                             gen_tcp:close(Socket),
                             {error, timeout}
