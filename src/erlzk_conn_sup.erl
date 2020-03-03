@@ -1,12 +1,12 @@
 %% 2013-2014 (c) Mega Yu <yuhg2310@gmail.com>
 %% 2013-2014 (c) huaban.com <www.huaban.com>
-%% 
+%%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
 %% You may obtain a copy of the License at
-%% 
+%%
 %%    http://www.apache.org/licenses/LICENSE-2.0
-%% 
+%%
 %% Unless required by applicable law or agreed to in writing, software
 %% distributed under the License is distributed on an "AS IS" BASIS,
 %% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -22,7 +22,12 @@
 -define(SUPERVISOR, ?MODULE).
 
 start_conn(Args) ->
-    supervisor:start_child(?SUPERVISOR, Args).
+    case supervisor:start_child(?SUPERVISOR, Args) of
+      {error, {already_started, Pid}} ->
+        {ok, Pid};
+      Other ->
+        Other
+    end.
 
 start_link() ->
     supervisor:start_link({local, ?SUPERVISOR}, ?MODULE, []).
