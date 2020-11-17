@@ -67,9 +67,14 @@ connect(ServerList, Timeout) ->
 
 %% @doc Connect to ZooKeeper.
 %% @see connect/4
--spec connect(server_list(), pos_integer(), options()) -> {ok, pid()} | {error, atom()};
-             ({local, Name::atom()} | {global, GlobalName::term()} | {via, Module::atom(), ViaName::term()},
-              server_list(), pos_integer()) -> {ok, pid()} | {error, atom()}.
+-spec connect(ServerList :: server_list(), 
+              Timeout :: pos_integer(), 
+              Options :: options()) -> supervisor:startchild_ret();
+             (ServerName :: {local, Name::atom()} | 
+                            {global, GlobalName::term()} | 
+                            {via, Module::atom(), ViaName::term()},
+              ServerList :: server_list(), 
+              Timeout :: pos_integer()) -> supervisor:startchild_ret().
 connect(ServerList, Timeout, Options) when is_list(Options) ->
     erlzk_conn_sup:start_conn([ServerList, Timeout, Options]);
 connect(ServerName, ServerList, Timeout) when is_integer(Timeout) ->
@@ -88,8 +93,13 @@ connect(ServerName, ServerList, Timeout) when is_integer(Timeout) ->
 %% <em>auth_data</em>: the auths need to be added after connected
 %%
 %% <em>monitor</em>: a process receiving the message of connection state changing
--spec connect({local, Name::atom()} | {global, GlobalName::term()} | {via, Module::atom(), ViaName::term()},
-              server_list(), pos_integer(), options()) -> {ok, pid()} | {error, atom()}.
+-spec connect(ServerName :: {local, Name::atom()} | 
+                            {global, GlobalName::term()} | 
+                            {via, Module::atom(), ViaName::term()},
+              ServerList :: server_list(), 
+              Timeout :: pos_integer(), 
+              Options :: options()) 
+             -> supervisor:startchild_ret().
 connect(ServerName, ServerList, Timeout, Options) ->
     erlzk_conn_sup:start_conn([ServerName, ServerList, Timeout, Options]).
 
